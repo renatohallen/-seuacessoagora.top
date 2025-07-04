@@ -1,55 +1,64 @@
 <?php
-session_start();
-header('Content-Type: application/json');
+require __DIR__.'/vendor/autoload.php';
 
-if (!isset($_GET['cpf'])) {
-    echo json_encode(["status" => 400, "message" => "CPF é obrigatório."]);
-    exit;
+header("Content-Type: application/json");
+header("Access-Control-Allow-Origin: *");
+
+use Firebase\JWT\JWT;
+use Dotenv\Dotenv;
+
+// Carrega variáveis de ambiente
+$dotenv = Dotenv::createImmutable(__DIR__);
+$dotenv->load();
+
+// Autenticação básica (JWT)
+$authHeader = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+if (!preg_match('/Bearer\s(\S+)/', $authHeader, $matches)) {
+    http_response_code(401);
+    die(json_encode(["error" => "Token não fornecido"]));
 }
 
-$cpf = preg_replace('/\D/', '', $_GET['cpf']);
-$cep = isset($_GET['cep']) ? preg_replace('/\D/', '', $_GET['cep']) : null;
-
-
-$api_cpf_url = "https://apela-api.tech?user=a9cc39d7-896a-493f-9586-886057200c14&cpf=$cpf";
-$cpf_response = file_get_contents($api_cpf_url);
-
-if ($cpf_response === false) {
-    echo json_encode(["status" => 500, "message" => "Erro ao buscar dados do CPF."]);
-    exit;
+$token = $matches[1];
+try {
+    JWT::decode($token, $_ENV['JWT_SECRET'], ['HS256']);
+} catch (Exception $e) {
+    http_response_code(401);
+    die(json_encode(["error" => "Token inválido"]));
 }
 
-$cpf_data = json_decode($cpf_response, true);
+// Conexão com o banco
+$db = new PDO(
+    "mysql:host={$_ENV['DB_HOST']};dbname={$_ENV['DB_NAME']}",
+    $_ENV['DB_USER'],
+    $_ENV['DB_PASS']
+);
 
-if (!isset($cpf_data['status']) || $cpf_data['status'] !== 200) {
-    echo json_encode(["status" => 404, "message" => "CPF não encontrado."]);
-    exit;
-}
-
-
-$_SESSION['dadosBasicos'] = [
-    "nome" => $cpf_data['nome'] ?? "Não informado",
-    "cpf" => $cpf_data['cpf'] ?? "Não informado",
-    "nascimento" => $cpf_data['nascimento'] ?? "Não informado",
-    "sexo" => $cpf_data['sexo'] ?? "Não informado",
-];
-
-if ($cep) {
-    $api_cep_url = "https://viacep.com.br/ws/$cep/json/";
-    $cep_response = file_get_contents($api_cep_url);
-
-    if ($cep_response !== false) {
-        $cep_data = json_decode($cep_response, true);
-        if (!isset($cep_data['erro'])) {
-            $_SESSION['dadosBasicos'] += [
-                "cep" => $cep_data['cep'] ?? "Não informado",
-                "logradouro" => $cep_data['logradouro'] ?? "Não informado",
-                "bairro" => $cep_data['bairro'] ?? "Não informado",
-                "municipio" => $cep_data['localidade'] ?? "Não informado",
-                "uf" => $cep_data['uf'] ?? "Não informado"
-            ];
-        }
+// Rota principal
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    $cpf = preg_replace('/\D/', '', $_GET['cpf'] ?? '');
+    
+    if (empty($cpf) || strlen($cpf) != 11) {
+        http_response_code(400);
+        echo json_encode(["error" => "CPF inválido"]);
+        exit;
     }
-}
 
-echo json_encode(["status" => 200, "message" => "Dados salvos."]);
+    $stmt = $db->prepare("SELECT * FROM clientes WHERE cpf = ?");
+    $stmt->execute([$cpf]);
+    $cliente = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$cliente) {
+        http_response_code(404);
+        echo json_encode(["error" => "Cliente não encontrado"]);
+        exit;
+    }
+
+    // Resposta formatada
+    echo json_encode([
+        "status" => 200,
+        "data" => [
+            "cliente" => $cliente,
+            "enderecos" => $db->query("SELECT * FROM enderecos WHERE cpf_cliente = '$cpf'")->fetchAll()
+        ]
+    ]);
+}
